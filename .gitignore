@@ -1,0 +1,5 @@
+node_modules/
+dist/
+backend/datalens.db
+.DS_Store
+*.local
