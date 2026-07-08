@@ -381,8 +381,8 @@ tr.out-row td{background:rgba(239,68,68,.05)}
     <div class="summary-layout">
       <div class="ai-card">
         <div class="ai-card-header">
-          <h2>🤖 AI Data Summary</h2>
-          <p>Automatically generated from your dataset</p>
+          <h2>🤖 AI Data Summary <span id="aiStatusPill" style="font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:20px;background:rgba(255,255,255,.25);vertical-align:middle">heuristic</span></h2>
+          <p id="aiCardSub">Automatically generated from your dataset</p>
         </div>
         <div class="ai-body">
           <div class="ai-domain" id="aiDomain">📊 General dataset</div>
@@ -462,6 +462,7 @@ tr.out-row td{background:rgba(239,68,68,.05)}
         <div class="dtab active" onclick="switchTab('overview')">Overview</div>
         <div class="dtab" onclick="switchTab('pivot')">Pivot Table</div>
         <div class="dtab" onclick="switchTab('quality')">Data Quality</div>
+        <div class="dtab" onclick="switchTab('ask')">🤖 Ask AI</div>
       </div>
       <div class="dash-main" id="dashMain"></div>
     </div>
@@ -748,6 +749,59 @@ function renderSummaryContent(){
 
   const obsEl=document.getElementById('aiObs');
   obsEl.innerHTML=summary.obs.map(o=>`<div class="ai-ob"><span class="ob-icon">${o.icon}</span><span>${o.text}</span></div>`).join('');
+
+  // Try to upgrade with real AI from the backend (graceful fallback to heuristic)
+  enhanceWithAI(data,cols);
+}
+
+// ── REAL AI (backend gateway) ──────────────────────────────────────────────────
+const AI_BASE=(location.protocol==='file:')?null:'';  // '' = same origin; null = no backend (file://)
+let AI_AVAILABLE=null;
+
+async function checkAI(){
+  if(AI_BASE===null){AI_AVAILABLE=false;return false;}
+  if(AI_AVAILABLE!==null) return AI_AVAILABLE;
+  try{
+    const r=await fetch(AI_BASE+'/api/health');
+    const j=await r.json();
+    AI_AVAILABLE=!!j.aiEnabled;
+  }catch(e){ AI_AVAILABLE=false; }
+  return AI_AVAILABLE;
+}
+
+async function enhanceWithAI(data,cols){
+  const pill=document.getElementById('aiStatusPill');
+  const sub=document.getElementById('aiCardSub');
+  if(!(await checkAI())){ if(pill)pill.textContent='heuristic'; return; }
+  if(pill){pill.textContent='✨ AI analysing…';}
+  if(sub)sub.textContent='Powered by real AI via secure gateway';
+  try{
+    const payload={
+      rowCount:data.length,
+      columns:cols.map(c=>({name:c.name,type:c.type})),
+      sampleRows:data.slice(0,40),
+      requirement:(document.getElementById('reqInput')?.value||S.requirement||'').trim()
+    };
+    const r=await fetch(AI_BASE+'/api/ai/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok) throw new Error('AI '+r.status);
+    const ai=await r.json();
+    // Merge AI results into the display
+    if(ai.domain){ document.getElementById('aiDomain').innerHTML=(ai.domainIcon||'🤖')+' '+ai.domain; }
+    if(ai.summary){ document.getElementById('aiSummaryText').innerHTML=ai.summary; }
+    if(Array.isArray(ai.observations)&&ai.observations.length){
+      document.getElementById('aiObs').innerHTML=ai.observations.map(o=>`<div class="ai-ob"><span class="ob-icon">💡</span><span>${o}</span></div>`).join('');
+    }
+    // AI-generated suggestions override heuristic ones
+    if(Array.isArray(ai.suggestions)&&ai.suggestions.length){
+      S.aiSummary.suggestions=ai.suggestions;
+      if(Array.isArray(ai.recommendedCharts)) S.aiSummary.recommendedCharts=ai.recommendedCharts;
+      renderSuggestions();
+    }
+    if(pill)pill.textContent='✨ AI powered';
+  }catch(e){
+    if(pill)pill.textContent='heuristic';
+    if(sub)sub.textContent='AI unavailable — showing built-in analysis';
+  }
 }
 
 function renderSuggestions(){
@@ -881,7 +935,7 @@ function renderDash(){
 
 function switchTab(tab){
   S.currentTab=tab;
-  const tabs=['overview','pivot','quality'];
+  const tabs=['overview','pivot','quality','ask'];
   document.querySelectorAll('.dtab').forEach((t,i)=>t.classList.toggle('active',tabs[i]===tab));
   renderMain();
 }
@@ -890,7 +944,82 @@ function renderMain(){
   const m=document.getElementById('dashMain'); m.innerHTML='';
   if(S.currentTab==='overview') renderOverview(m);
   else if(S.currentTab==='pivot') renderPivotUI(m);
+  else if(S.currentTab==='ask') renderAskAI(m);
   else renderQuality(m);
+}
+
+// ── ASK AI (chat over your data) ───────────────────────────────────────────────
+let askHistory=[];
+function renderAskAI(m){
+  const wrap=document.createElement('div');
+  wrap.style.cssText='max-width:760px;margin:0 auto;width:100%;display:flex;flex-direction:column;gap:16px';
+  wrap.innerHTML=`
+    <div class="piv-wrap">
+      <h3>🤖 Ask AI about your data</h3>
+      <p style="font-size:.83rem;color:var(--text2);margin-bottom:14px;line-height:1.6">Ask questions in plain English about the ${fmtN(S.filtered.length)} rows currently in view. The AI sees a profile of your columns and a data sample.</p>
+      <div id="askStatus" style="font-size:.75rem;font-weight:700;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="askInput" class="tbl-search" style="flex:1;min-width:220px" placeholder="e.g. Which category has the highest average revenue?" onkeydown="if(event.key==='Enter')sendAsk()">
+        <button class="btn btn-primary btn-sm" onclick="sendAsk()">Ask →</button>
+      </div>
+      <div id="askSuggest" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px"></div>
+    </div>
+    <div id="askThread" style="display:flex;flex-direction:column;gap:12px"></div>`;
+  m.appendChild(wrap);
+
+  // status
+  const st=document.getElementById('askStatus');
+  checkAI().then(ok=>{
+    st.innerHTML= ok
+      ? '<span style="color:var(--success)">● AI connected via secure gateway</span>'
+      : '<span style="color:var(--warn)">● AI backend not detected — run the Node server (npm start) to enable. Charts &amp; analysis still work.</span>';
+  });
+
+  // suggestions from AI summary
+  const sug=document.getElementById('askSuggest');
+  const list=(S.aiSummary?.suggestions)||['What are the key trends?','Which columns have outliers?','Summarise the top segments'];
+  list.forEach(s=>{ const c=document.createElement('div'); c.className='req-sug'; c.textContent=s; c.onclick=()=>{document.getElementById('askInput').value=s;sendAsk();}; sug.appendChild(c); });
+
+  // replay history
+  askHistory.forEach(h=>appendAsk(h.role,h.text));
+}
+
+function appendAsk(role,text){
+  const thread=document.getElementById('askThread'); if(!thread) return;
+  const bubble=document.createElement('div');
+  const isUser=role==='user';
+  bubble.style.cssText=`align-self:${isUser?'flex-end':'flex-start'};max-width:85%;padding:12px 16px;border-radius:14px;font-size:.87rem;line-height:1.6;${isUser?'background:var(--grad);color:#fff;border-bottom-right-radius:4px':'background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px'}`;
+  bubble.innerHTML=(isUser?'':'🤖 ')+text;
+  thread.appendChild(bubble);
+  thread.scrollIntoView({block:'end'});
+}
+
+async function sendAsk(){
+  const inp=document.getElementById('askInput');
+  const q=inp.value.trim(); if(!q) return;
+  inp.value='';
+  askHistory.push({role:'user',text:q}); appendAsk('user',q);
+  if(!(await checkAI())){
+    const msg='AI backend not available. Start the Node server (cd backend && npm start) and open the app at localhost:9080 to enable AI answers.';
+    askHistory.push({role:'ai',text:msg}); appendAsk('ai',msg); return;
+  }
+  const thread=document.getElementById('askThread');
+  const loading=document.createElement('div');
+  loading.style.cssText='align-self:flex-start;padding:12px 16px;color:var(--text3);font-size:.85rem';
+  loading.textContent='🤖 Thinking…'; thread.appendChild(loading);
+  try{
+    const data=applyCalcCols(S.filtered);
+    const payload={question:q,rowCount:data.length,columns:S.active.map(c=>({name:c.name,type:c.type})),sampleRows:data.slice(0,40)};
+    const r=await fetch(AI_BASE+'/api/ai/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const j=await r.json();
+    loading.remove();
+    const ans=j.answer||('Error: '+(j.error||'no response'));
+    askHistory.push({role:'ai',text:ans}); appendAsk('ai',ans);
+  }catch(e){
+    loading.remove();
+    const msg='Error contacting AI: '+e.message;
+    askHistory.push({role:'ai',text:msg}); appendAsk('ai',msg);
+  }
 }
 
 // ── SIDEBAR ───────────────────────────────────────────────────────────────────
