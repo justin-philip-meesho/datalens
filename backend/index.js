@@ -16,9 +16,9 @@ const db = require('./db');
 const ai = require('./ai');
 
 const app = express();
-const PORT = process.env.PORT || 8090;
+const PORT = process.env.PORT || 8290;
 
-app.use(cors({ origin: ['http://localhost:9080', 'http://localhost:8090'] }));
+app.use(cors({ origin: ['http://localhost:9280', 'http://localhost:8290'] }));
 app.use(express.json({ limit: '50mb' }));
 
 // ── Health ──────────────────────────────────────────────────────────────────

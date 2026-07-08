@@ -18,19 +18,21 @@ cd ../frontend && npm install
 
 Open **two terminals**:
 
-**Terminal 1 — Backend (port 8090)**
+**Terminal 1 — Backend (port 8290)**
 ```bash
 cd backend
 npm start
 ```
 
-**Terminal 2 — Frontend (port 9080)**
+**Terminal 2 — Frontend (port 9280)**
 ```bash
 cd frontend
 npm run dev
 ```
 
-Then open **http://localhost:9080** in your browser.
+Then open **http://localhost:9280** in your browser.
+
+> **Note:** local dev runs on 9280 (frontend) / 8290 (backend) to avoid conflicts with other apps. The Buildathon submission build must use 9080 / 8090 — flip these back before packaging the final Docker image.
 
 ---
 
@@ -39,7 +41,7 @@ Then open **http://localhost:9080** in your browser.
 ```
 ┌─────────────────────────┐       ┌──────────────────────────┐
 │  React Frontend         │       │  Node.js Backend          │
-│  Vite · port 9080       │──────▶│  Express · port 8090      │
+│  Vite · port 9280       │──────▶│  Express · port 8290      │
 │                         │  API  │  SQLite (better-sqlite3)  │
 │  • DataLens dashboard   │       │                           │
 │  • Cloud save/load UI   │       │  POST /api/dashboards     │
