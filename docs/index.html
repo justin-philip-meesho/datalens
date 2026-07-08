@@ -495,6 +495,18 @@ const S = {
   }
 };
 
+// ── GLOBAL ERROR SAFETY NET ────────────────────────────────────────────────────
+// Any uncaught error surfaces as a toast + hides the loading overlay, so the app
+// can never silently blank out after an action like upload.
+window.addEventListener('error',e=>{
+  try{ hideLoading(); }catch(_){}
+  try{ toast('Something went wrong: '+(e.message||'unknown error'),5000); }catch(_){}
+});
+window.addEventListener('unhandledrejection',e=>{
+  try{ hideLoading(); }catch(_){}
+  try{ toast('Error: '+((e.reason&&e.reason.message)||e.reason||'request failed'),5000); }catch(_){}
+});
+
 // ── DARK MODE ─────────────────────────────────────────────────────────────────
 function toggleDark(){
   document.body.classList.toggle('dark');
@@ -572,15 +584,39 @@ function hideLoading(){ document.getElementById('loadingOverlay').classList.remo
 
 function afterLoad(){
   const names=Object.keys(S.sheets);
-  S.selSheets=[names[0]]; S.activeSheet=names[0];
+  if(!names.length){ hideLoading(); toast('No sheets found in file',4000); return; }
+  // Pick the first sheet that actually has rows (skip empty cover/title sheets)
+  const firstNonEmpty=names.find(n=>(S.sheets[n].data||[]).length>0)||names[0];
+  S.selSheets=[firstNonEmpty]; S.activeSheet=firstNonEmpty;
   const saved=loadSavedState(S.file);
-  if(saved){ S.selSheets=saved.selSheets||S.selSheets; S.activeSheet=saved.activeSheet||names[0]; S.requirement=saved.requirement||''; }
+  if(saved){
+    // Only restore saved sheet selection if those sheets still exist
+    if(Array.isArray(saved.selSheets)&&saved.selSheets.every(s=>names.includes(s))) S.selSheets=saved.selSheets;
+    if(saved.activeSheet&&names.includes(saved.activeSheet)) S.activeSheet=saved.activeSheet;
+    S.requirement=saved.requirement||'';
+  }
   buildColsFromSheet();
   setTimeout(()=>{
     hideLoading();
-    renderSummaryScreen();
-    advanceTo(2);
+    try{
+      renderSummaryScreen();
+      advanceTo(2);
+    }catch(err){
+      // Never leave the user on a blank screen — surface the error and still advance
+      console.error('Summary render failed:',err);
+      showSummaryError(err);
+      advanceTo(2);
+    }
   },600);
+}
+
+function showSummaryError(err){
+  const el=document.getElementById('aiSummaryText');
+  if(el) el.innerHTML='<span style="color:var(--danger)">Could not auto-summarise this file ('+(err&&err.message||'unknown error')+'), but your data loaded fine. Click <strong>Configure Columns</strong> or <strong>Skip to Dashboard</strong> to continue.</span>';
+  const dom=document.getElementById('aiDomain'); if(dom) dom.innerHTML='⚠️ Summary unavailable';
+  const obs=document.getElementById('aiObs'); if(obs) obs.innerHTML='';
+  const stats=document.getElementById('aiStats');
+  if(stats) stats.innerHTML=`<div class="ai-stat"><span class="ai-stat-val">${(S.data.length||0).toLocaleString()}</span><div class="ai-stat-label">Rows</div></div><div class="ai-stat"><span class="ai-stat-val">${S.cols.length}</span><div class="ai-stat-label">Columns</div></div><div class="ai-stat"><span class="ai-stat-val">${S.selSheets.length}</span><div class="ai-stat-label">Sheets</div></div>`;
 }
 
 function detectDelim(t){ const l=t.split('\n')[0]; return (l.match(/\t/g)||[]).length>(l.match(/,/g)||[]).length?'\t':','; }
@@ -855,7 +891,7 @@ function renderColCards(){
     <div class="col-info">
       <div class="ci"><span>${data.length-nulls}</span>non-null</div>
       <div class="ci"><span>${uniq}</span>unique</div>
-      ${c.type==='number'&&vals.length?`<div class="ci"><span>${fmtN(Math.min(...vals.map(Number)))}</span>min</div><div class="ci"><span>${fmtN(Math.max(...vals.map(Number)))}</span>max</div>`:''}
+      ${c.type==='number'&&vals.length?`<div class="ci"><span>${fmtN(aMin(vals.map(Number)))}</span>min</div><div class="ci"><span>${fmtN(aMax(vals.map(Number)))}</span>max</div>`:''}
     </div>
     <select class="type-sel" onchange="setColType(${i},this.value)">
       ${['number','text','date','boolean'].map(t=>`<option value="${t}"${c.type===t?' selected':''}>${t}</option>`).join('')}
@@ -1044,7 +1080,7 @@ function renderSidebar(){
     if(c.type==='number'){
       const vals=data.map(r=>+r[c.name]).filter(v=>!isNaN(v));
       if(!vals.length) return;
-      const mn=Math.min(...vals),mx=Math.max(...vals),cur=S.filters[c.name]||[mn,mx];
+      const mn=aMin(vals),mx=aMax(vals),cur=S.filters[c.name]||[mn,mx];
       const item=document.createElement('div');item.className='f-item';
       const rid='r_'+c.name.replace(/\W/g,'_'),lid='l_'+c.name.replace(/\W/g,'_');
       item.innerHTML=`<label>${c.name}</label><input id="${rid}" type="range" min="${mn}" max="${mx}" step="${(mx-mn)/100||1}" value="${cur[1]}"><div class="f-val" id="${lid}">≤ ${fmtN(cur[1])}</div>`;
@@ -1167,7 +1203,7 @@ function copts(o){
 
 function buildHistogram(parent,data,col){
   const vals=data.map(r=>+r[col.name]).filter(v=>!isNaN(v));if(vals.length<5)return;
-  const mn=Math.min(...vals),mx=Math.max(...vals),bins=20,w=(mx-mn)/bins||1;
+  const mn=aMin(vals),mx=aMax(vals),bins=20,w=(mx-mn)/bins||1;
   const counts=Array(bins).fill(0);
   vals.forEach(v=>counts[Math.min(Math.floor((v-mn)/w),bins-1)]++);
   const {lo,hi}=iqrBounds(vals);
@@ -1201,7 +1237,7 @@ function drawBox(cv,{q1,med,q3,wlo,whi,outliers}){
     const W=cv.offsetWidth||400,H=cv.offsetHeight||160;
     cv.width=W*devicePixelRatio;cv.height=H*devicePixelRatio;
     const ctx=cv.getContext('2d');ctx.scale(devicePixelRatio,devicePixelRatio);
-    const pad=50,cx=W-pad*2,all=[wlo,q1,med,q3,whi,...outliers],mn=Math.min(...all),mx=Math.max(...all),rng=mx-mn||1;
+    const pad=50,cx=W-pad*2,all=[wlo,q1,med,q3,whi,...outliers],mn=aMin(all),mx=aMax(all),rng=mx-mn||1;
     const sc=v=>pad+(v-mn)/rng*cx,midY=H/2,bh=H*.3,tc=isDark()?'#B8B0D8':'#4B4468';
     ctx.clearRect(0,0,W,H);
     ctx.strokeStyle=PAL[0];ctx.lineWidth=2;
@@ -1252,7 +1288,7 @@ function buildScatter(parent,data,cx,cy){
   const pts=data.map(r=>({x:+r[cx.name],y:+r[cy.name]})).filter(p=>!isNaN(p.x)&&!isNaN(p.y));
   if(pts.length<5)return;
   const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y);
-  const{slope,intercept}=linReg(xs,ys),xmin=Math.min(...xs),xmax=Math.max(...xs),r=pearson(xs,ys);
+  const{slope,intercept}=linReg(xs,ys),xmin=aMin(xs),xmax=aMax(xs),r=pearson(xs,ys);
   const{canvas}=mkCard(parent,cx.name+' vs '+cy.name,'r='+r.toFixed(3)+' · R²='+(r*r).toFixed(3));
   S.charts['scatter']=new Chart(canvas,{type:'scatter',data:{datasets:[
     {label:'Data',data:pts,backgroundColor:ha(PAL[0],.5),pointRadius:4},
@@ -1351,7 +1387,7 @@ function buildPivot(){
   const cVals=cF?[...new Set(data.map(r=>String(r[cF]??'')))].sort():['Value'];
   const mx={};rVals.forEach(rv=>{mx[rv]={};cVals.forEach(cv=>mx[rv][cv]=[]); });
   data.forEach(r=>{const rv=String(r[rF]??''),cv=cF?String(r[cF]??''):'Value';if(mx[rv]?.[cv]!==undefined)mx[rv][cv].push(+r[vF]||0);});
-  const ag=arr=>{if(!arr.length)return'';if(agg==='SUM')return fmtN(arr.reduce((a,b)=>a+b,0));if(agg==='AVG')return fmtN(arr.reduce((a,b)=>a+b,0)/arr.length);if(agg==='COUNT')return arr.length;if(agg==='MIN')return fmtN(Math.min(...arr));if(agg==='MAX')return fmtN(Math.max(...arr));};
+  const ag=arr=>{if(!arr.length)return'';if(agg==='SUM')return fmtN(arr.reduce((a,b)=>a+b,0));if(agg==='AVG')return fmtN(arr.reduce((a,b)=>a+b,0)/arr.length);if(agg==='COUNT')return arr.length;if(agg==='MIN')return fmtN(aMin(arr));if(agg==='MAX')return fmtN(aMax(arr));};
   let html=`<table class="pt"><thead><tr><th class="rh">${rF}</th>`;
   cVals.forEach(cv=>html+=`<th>${cv}</th>`);html+=`<th class="tc">Total</th></tr></thead><tbody>`;
   rVals.forEach(rv=>{html+=`<tr><td class="rl">${rv}</td>`;let tot=[];cVals.forEach(cv=>{html+=`<td>${ag(mx[rv][cv]||[])}</td>`;tot=[...tot,...(mx[rv][cv]||[])];});html+=`<td class="tc">${ag(tot)}</td></tr>`;});
@@ -1376,7 +1412,7 @@ function renderQuality(m){
     if(c.type==='number'){
       const nv=vals.filter(v=>!isNaN(+v)&&v!=='').map(Number),outs=getOutliers(nv);
       score+=Math.round((1-outs.length/Math.max(nv.length,1))*40);
-      if(nv.length){const mn=Math.min(...nv),mx=Math.max(...nv),avg=nv.reduce((a,b)=>a+b,0)/nv.length;extras=`<div class="dq-stats"><div class="dq-s"><span>${fmtN(mn)}</span>min</div><div class="dq-s"><span>${fmtN(mx)}</span>max</div><div class="dq-s"><span>${fmtN(avg)}</span>mean</div><div class="dq-s"><span style="color:${outs.length?'var(--danger)':'var(--success)'}">${outs.length}</span>outliers</div></div>`;}
+      if(nv.length){const mn=aMin(nv),mx=aMax(nv),avg=nv.reduce((a,b)=>a+b,0)/nv.length;extras=`<div class="dq-stats"><div class="dq-s"><span>${fmtN(mn)}</span>min</div><div class="dq-s"><span>${fmtN(mx)}</span>max</div><div class="dq-s"><span>${fmtN(avg)}</span>mean</div><div class="dq-s"><span style="color:${outs.length?'var(--danger)':'var(--success)'}">${outs.length}</span>outliers</div></div>`;}
     }else{score+=40;extras=`<div class="dq-stats"><div class="dq-s"><span>${uniq}</span>unique</div><div class="dq-s"><span>${c.type}</span>type</div></div>`;}
     score=Math.min(100,score);
     const sc=score>=80?'sc-hi':score>=50?'sc-med':'sc-lo';
@@ -1448,6 +1484,10 @@ function iqrBounds(vals){if(vals.length<4)return{lo:-Infinity,hi:Infinity};const
 function getOutliers(vals){if(vals.length<4)return[];const{lo,hi}=iqrBounds(vals);return vals.filter(v=>v<lo||v>hi);}
 function fmtN(n){if(n===undefined||n===null||isNaN(+n))return n==null?'':String(n);n=+n;if(Math.abs(n)>=1e9)return(n/1e9).toFixed(1)+'B';if(Math.abs(n)>=1e6)return(n/1e6).toFixed(1)+'M';if(Math.abs(n)>=1e3)return(n/1e3).toFixed(1)+'K';return Number.isInteger(n)?String(n):n.toFixed(2);}
 function pct(a,b){return b?Math.round(a/b*100):0;}
+// Loop-based min/max — safe for very large arrays (Math.min(...arr) overflows the
+// call stack past ~100k elements, which would blank the dashboard on big files).
+function aMin(arr){let m=Infinity;for(let i=0;i<arr.length;i++){if(arr[i]<m)m=arr[i];}return m;}
+function aMax(arr){let m=-Infinity;for(let i=0;i<arr.length;i++){if(arr[i]>m)m=arr[i];}return m;}
 
 // Boot stepper to show only step 1 unlocked
 goToStep(1);
