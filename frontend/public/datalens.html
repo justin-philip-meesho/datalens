@@ -653,6 +653,19 @@ function loadSample(name){
 function rdate(f,t){ const fd=new Date(f),td=new Date(t); return new Date(fd.getTime()+Math.random()*(td-fd)).toISOString().slice(0,10); }
 
 // ── COLUMNS ───────────────────────────────────────────────────────────────────
+// Returns true if a column looks like a unique identifier (should skip analytics)
+function isIdCol(name, vals, totalRows){
+  const n=name.toLowerCase().replace(/[\s_-]/g,'');
+  // Name-based: common ID/contact/code patterns
+  if(/(\bid\b|ids|_id|id$|empid|empno|empcode|employeeid|employeeno|userid|orderid|invoiceid|txnid|transactionid|customerid|uuid|guid|serialno|serialnumber|regno|rollno|aadhar|pan\b|ssn|passport|phone|mobile|contact|email|zipcode|pincode|postalcode|ifsc|iban|accountno|cardno)/.test(n)) return true;
+  // Cardinality-based: >85% unique across sampled rows (numbers that are codes, not metrics)
+  if(vals.length>10){
+    const uniq=new Set(vals.map(String)).size;
+    if(uniq/Math.min(vals.length,totalRows)>0.85) return true;
+  }
+  return false;
+}
+
 function buildColsFromSheet(){
   const data=S.sheets[S.activeSheet]?.data||[];
   if(!data.length) return;
@@ -661,7 +674,8 @@ function buildColsFromSheet(){
     const vals=data.slice(0,80).map(r=>r[k]).filter(v=>v!==''&&v!=null);
     const type=detectType(vals);
     const sc=saved?.cols?.find(c=>c.name===k);
-    return{name:k,on:sc?sc.on:true,type:sc?.type||type};
+    const isId=isIdCol(k,vals,data.length);
+    return{name:k,on:sc?sc.on:true,type:sc?.type||type,isId};
   });
   S.calcCols=saved?.calcCols||[];
 }
@@ -675,9 +689,9 @@ function detectType(vals){
 
 // ── AI SUMMARY ────────────────────────────────────────────────────────────────
 function generateAISummary(data, cols){
-  const numCols=cols.filter(c=>c.type==='number');
-  const textCols=cols.filter(c=>c.type==='text'||c.type==='boolean');
-  const dateCols=cols.filter(c=>c.type==='date');
+  const numCols=cols.filter(c=>c.type==='number'&&!c.isId);
+  const textCols=cols.filter(c=>(c.type==='text'||c.type==='boolean')&&!c.isId);
+  const dateCols=cols.filter(c=>c.type==='date'&&!c.isId);
   const colNames=cols.map(c=>c.name.toLowerCase()).join(' ');
 
   // Domain detection
@@ -881,17 +895,18 @@ function renderColCards(){
     const nulls=data.filter(r=>r[c.name]===''||r[c.name]==null).length;
     const uniq=new Set(vals.map(String)).size;
     const card=document.createElement('div');
-    card.className='col-card type-'+c.type+(c.on?' on':' off');
+    card.className='col-card type-'+c.type+(c.on?' on':' off')+(c.isId?' is-id':'');
     const icons={number:'#',text:'Aa',date:'📅',boolean:'⚡'};
     card.innerHTML=`<div class="col-top">
       <div class="col-icon2">${icons[c.type]||'?'}</div>
       <div class="col-name2" title="${c.name}">${c.name}</div>
       <label class="tog"><input type="checkbox" ${c.on?'checked':''} onchange="toggleCol(${i},this.checked)"><span class="tog-sl"></span></label>
     </div>
+    ${c.isId?`<div style="font-size:.68rem;font-weight:700;color:#b45309;background:#fef3c7;border-radius:4px;padding:2px 7px;display:inline-block;margin-bottom:5px">🔑 Identifier — analytics skipped</div>`:''}
     <div class="col-info">
       <div class="ci"><span>${data.length-nulls}</span>non-null</div>
       <div class="ci"><span>${uniq}</span>unique</div>
-      ${c.type==='number'&&vals.length?`<div class="ci"><span>${fmtN(aMin(vals.map(Number)))}</span>min</div><div class="ci"><span>${fmtN(aMax(vals.map(Number)))}</span>max</div>`:''}
+      ${c.type==='number'&&vals.length&&!c.isId?`<div class="ci"><span>${fmtN(aMin(vals.map(Number)))}</span>min</div><div class="ci"><span>${fmtN(aMax(vals.map(Number)))}</span>max</div>`:''}
     </div>
     <select class="type-sel" onchange="setColType(${i},this.value)">
       ${['number','text','date','boolean'].map(t=>`<option value="${t}"${c.type===t?' selected':''}>${t}</option>`).join('')}
@@ -1076,7 +1091,7 @@ function renderSidebar(){
     sec.body.appendChild(ac); sb.appendChild(sec.el);
   }
   const sec2=mkSbSec('Filter by Field');
-  active.forEach(c=>{
+  active.filter(c=>!c.isId).forEach(c=>{
     if(c.type==='number'){
       const vals=data.map(r=>+r[c.name]).filter(v=>!isNaN(v));
       if(!vals.length) return;
@@ -1117,9 +1132,9 @@ function renderOverview(m){
   buildKPIs(m,data,active);
   buildInsights(m,data,active);
   const cg=document.createElement('div');cg.className='cg';m.appendChild(cg);
-  const numCols=active.filter(c=>c.type==='number');
-  const textCols=active.filter(c=>c.type==='text'||c.type==='boolean');
-  const dateCols=active.filter(c=>c.type==='date');
+  const numCols=active.filter(c=>c.type==='number'&&!c.isId);
+  const textCols=active.filter(c=>(c.type==='text'||c.type==='boolean')&&!c.isId);
+  const dateCols=active.filter(c=>c.type==='date'&&!c.isId);
   numCols.slice(0,4).forEach(c=>{buildHistogram(cg,data,c);buildBoxPlot(cg,data,c);});
   textCols.slice(0,3).forEach(c=>{const u=new Set(data.map(r=>String(r[c.name]??''))).size;if(u>=2&&u<=15)buildCatChart(cg,data,c);});
   if(dateCols.length&&numCols.length) buildTimeSeries(cg,data,dateCols[0],numCols.slice(0,2));
@@ -1132,7 +1147,7 @@ function renderOverview(m){
 function buildKPIs(m,data,active){
   const row=document.createElement('div');row.className='kpi-row';
   row.appendChild(mkKPI('Total Rows',fmtN(data.length),'records'));
-  active.filter(c=>c.type==='number').slice(0,5).forEach(c=>{
+  active.filter(c=>c.type==='number'&&!c.isId).slice(0,5).forEach(c=>{
     const vals=data.map(r=>+r[c.name]).filter(v=>!isNaN(v));if(!vals.length)return;
     const sum=vals.reduce((a,b)=>a+b,0);
     row.appendChild(mkKPI('Total '+c.name,fmtN(sum),'avg '+fmtN(sum/vals.length)));
@@ -1149,8 +1164,8 @@ function mkKPI(label,val,sub){
 function buildInsights(m,data,active){
   const bar=document.createElement('div');bar.className='ins-bar';
   const ins=[];
-  const numCols=active.filter(c=>c.type==='number');
-  const textCols=active.filter(c=>c.type==='text');
+  const numCols=active.filter(c=>c.type==='number'&&!c.isId);
+  const textCols=active.filter(c=>c.type==='text'&&!c.isId);
   ins.push({type:'info',text:'📊 '+data.length+' rows · '+active.length+' columns'});
   if(S.requirement) ins.push({type:'info',text:'💬 Focus: '+S.requirement.slice(0,60)+(S.requirement.length>60?'…':'')});
   numCols.forEach(c=>{
