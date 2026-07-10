@@ -595,6 +595,8 @@ function afterLoad(){
     if(saved.activeSheet&&names.includes(saved.activeSheet)) S.activeSheet=saved.activeSheet;
     S.requirement=saved.requirement||'';
   }
+  // Reset AI state for new file
+  S.aiDashPlan=null; S.aiPending=false;
   buildColsFromSheet();
   setTimeout(()=>{
     hideLoading();
@@ -674,7 +676,8 @@ function buildColsFromSheet(){
     const vals=data.slice(0,80).map(r=>r[k]).filter(v=>v!==''&&v!=null);
     const type=detectType(vals);
     const sc=saved?.cols?.find(c=>c.name===k);
-    const isId=isIdCol(k,vals,data.length);
+    // PII cols (DOB, DOJ, phone, email) are treated as identifiers — skip all analytics
+    const isId=isIdCol(k,vals,data.length)||isPIICol(k);
     return{name:k,on:sc?sc.on:true,type:sc?.type||type,isId};
   });
   S.calcCols=saved?.calcCols||[];
@@ -903,8 +906,15 @@ async function enhanceWithAI(data,cols){
       suggestions: Array.isArray(ai.suggestions)?ai.suggestions:[]
     };
     S.aiPending=false;
-    // Re-render dashboard if already open
-    if(S.currentTab==='overview') refreshAll();
+    // Force re-render dashboard regardless of which tab is active
+    const dm=document.getElementById('dashMain');
+    if(dm&&S.currentTab==='overview'){
+      Object.values(S.charts).forEach(c=>{try{c.destroy();}catch(_){}});
+      S.charts={};
+      dm.innerHTML='';
+      renderOverview(dm);
+      renderSidebar();
+    }
   }catch(e){
     S.aiPending=false;
     if(pill) pill.textContent='heuristic';
