@@ -480,7 +480,7 @@ const S = {
   file:null, sheets:{}, selSheets:[], activeSheet:null,
   cols:[], calcCols:[], filters:{}, charts:{},
   sortKey:null, sortAsc:true, page:1, psize:50, tq:'',
-  currentTab:'overview', requirement:'', aiSummary:null,
+  currentTab:'overview', requirement:'', aiSummary:null, aiDashPlan:null, aiPending:false,
   get data(){ return this.sheets[this.activeSheet]?.data||[]; },
   get active(){ return [...this.cols.filter(c=>c.on), ...this.calcCols]; },
   get filtered(){
@@ -864,8 +864,9 @@ async function enhanceWithAI(data,cols){
   const pill=document.getElementById('aiStatusPill');
   const sub=document.getElementById('aiCardSub');
   if(!(await checkAI())){ if(pill)pill.textContent='heuristic'; return; }
-  if(pill){pill.textContent='✨ AI analysing…';}
-  if(sub)sub.textContent='Powered by real AI via secure gateway';
+  if(pill) pill.textContent='✨ AI reading your data…';
+  if(sub) sub.textContent='AI is interpreting your dataset — dashboard will build from its findings';
+  S.aiPending=true;
   try{
     const aiCols=cols.filter(c=>!c.isId&&!isPIICol(c.name));
     const payload={
@@ -878,22 +879,36 @@ async function enhanceWithAI(data,cols){
     const r=await fetch(AI_BASE+'/api/ai/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     if(!r.ok) throw new Error('AI '+r.status);
     const ai=await r.json();
-    // Merge AI results into the display
-    if(ai.domain){ document.getElementById('aiDomain').innerHTML=(ai.domainIcon||'🤖')+' '+ai.domain; }
-    if(ai.summary){ document.getElementById('aiSummaryText').innerHTML=ai.summary; }
+
+    // Update summary screen
+    if(ai.domain) document.getElementById('aiDomain').innerHTML=(ai.domainIcon||'🤖')+' '+ai.domain;
+    if(ai.summary) document.getElementById('aiSummaryText').innerHTML=ai.summary;
     if(Array.isArray(ai.observations)&&ai.observations.length){
       document.getElementById('aiObs').innerHTML=ai.observations.map(o=>`<div class="ai-ob"><span class="ob-icon">💡</span><span>${o}</span></div>`).join('');
     }
-    // AI-generated suggestions override heuristic ones
     if(Array.isArray(ai.suggestions)&&ai.suggestions.length){
       S.aiSummary.suggestions=ai.suggestions;
-      if(Array.isArray(ai.recommendedCharts)) S.aiSummary.recommendedCharts=ai.recommendedCharts;
       renderSuggestions();
     }
-    if(pill)pill.textContent='✨ AI powered';
+    if(pill) pill.textContent='✨ AI powered';
+    if(sub) sub.textContent='Dashboard built from AI interpretation';
+
+    // Store dashboard plan — this drives the Overview tab
+    S.aiDashPlan={
+      keyMetrics: Array.isArray(ai.keyMetrics)?ai.keyMetrics:[],
+      keyDimensions: Array.isArray(ai.keyDimensions)?ai.keyDimensions:[],
+      keyDateCol: ai.keyDateCol||null,
+      charts: Array.isArray(ai.charts)?ai.charts:[],
+      observations: Array.isArray(ai.observations)?ai.observations:[],
+      suggestions: Array.isArray(ai.suggestions)?ai.suggestions:[]
+    };
+    S.aiPending=false;
+    // Re-render dashboard if already open
+    if(S.currentTab==='overview') refreshAll();
   }catch(e){
-    if(pill)pill.textContent='heuristic';
-    if(sub)sub.textContent='AI unavailable — showing built-in analysis';
+    S.aiPending=false;
+    if(pill) pill.textContent='heuristic';
+    if(sub) sub.textContent='AI unavailable — showing built-in analysis';
   }
 }
 
@@ -1192,6 +1207,59 @@ function renderOverview(m){
   S.charts={};
   const data=applyCalcCols(S.filtered),active=S.active;
   if(!data.length){m.innerHTML='<div class="empty">🔍 No data matches current filters.</div>';return;}
+
+  // AI is still thinking — show a waiting state and re-render when it lands
+  if(S.aiPending){
+    buildKPIs(m,data,active);
+    const wait=document.createElement('div');
+    wait.style.cssText='padding:40px;text-align:center;color:var(--text2);font-size:.9rem;grid-column:1/-1';
+    wait.innerHTML='<div style="font-size:2rem;margin-bottom:12px">🤖</div><strong>AI is reading your data…</strong><br><span style="font-size:.8rem">Dashboard will update automatically once complete</span>';
+    const cg=document.createElement('div');cg.className='cg';cg.appendChild(wait);m.appendChild(cg);
+    buildTable(m,data,active);
+    return;
+  }
+
+  // AI plan available — build AI-driven dashboard
+  if(S.aiDashPlan){
+    buildAIDashboard(m,data,active,S.aiDashPlan);
+  } else {
+    buildHeuristicDashboard(m,data,active);
+  }
+}
+
+function buildAIDashboard(m,data,active,plan){
+  buildKPIsFromPlan(m,data,active,plan);
+  buildInsightsFromPlan(m,plan);
+  const cg=document.createElement('div');cg.className='cg';m.appendChild(cg);
+  const colMap={};active.forEach(c=>colMap[c.name]=c);
+
+  plan.charts.forEach(spec=>{
+    try{
+      if(spec.type==='histogram'&&colMap[spec.col]) buildHistogram(cg,data,colMap[spec.col]);
+      else if(spec.type==='boxplot'&&colMap[spec.col]) buildBoxPlot(cg,data,colMap[spec.col]);
+      else if(spec.type==='donut'&&colMap[spec.col]) buildCatChart(cg,data,colMap[spec.col]);
+      else if(spec.type==='bar'&&colMap[spec.xCol]&&colMap[spec.yCol]) buildBarGrouped(cg,data,spec,colMap);
+      else if(spec.type==='timeseries'&&colMap[spec.dateCol]&&colMap[spec.valueCol]) buildTimeSeries(cg,data,colMap[spec.dateCol],[colMap[spec.valueCol]]);
+      else if(spec.type==='scatter'&&colMap[spec.xCol]&&colMap[spec.yCol]) buildScatter(cg,data,colMap[spec.xCol],colMap[spec.yCol]);
+    }catch(e){}
+  });
+
+  // If AI gave fewer than 2 charts, fall back to heuristics for remaining slots
+  if(plan.charts.length<2){
+    const numCols=active.filter(c=>c.type==='number'&&!c.isId);
+    const textCols=active.filter(c=>(c.type==='text'||c.type==='boolean')&&!c.isId);
+    numCols.slice(0,2).forEach(c=>buildHistogram(cg,data,c));
+    textCols.slice(0,2).forEach(c=>{const u=new Set(data.map(r=>String(r[c.name]??''))).size;if(u>=2&&u<=15)buildCatChart(cg,data,c);});
+  }
+
+  // Always add heatmap if enough numeric cols
+  const numCols=active.filter(c=>c.type==='number'&&!c.isId);
+  if(numCols.length>=3) buildHeatmap(cg,data,numCols.slice(0,8));
+
+  buildTable(m,data,active);
+}
+
+function buildHeuristicDashboard(m,data,active){
   buildKPIs(m,data,active);
   buildInsights(m,data,active);
   const cg=document.createElement('div');cg.className='cg';m.appendChild(cg);
@@ -1207,16 +1275,31 @@ function renderOverview(m){
 }
 
 // ── KPIs ──────────────────────────────────────────────────────────────────────
+function buildKPIsFromPlan(m,data,active,plan){
+  const row=document.createElement('div');row.className='kpi-row';
+  row.appendChild(mkKPI('Total Rows',fmtN(data.length),'records'));
+  const colMap={};active.forEach(c=>colMap[c.name]=c);
+  const metrics=plan.keyMetrics.length ? plan.keyMetrics : active.filter(c=>c.type==='number'&&!c.isId).slice(0,4).map(c=>c.name);
+  metrics.slice(0,5).forEach(name=>{
+    const c=colMap[name]; if(!c||c.type!=='number') return;
+    const vals=data.map(r=>+r[name]).filter(v=>!isNaN(v)); if(!vals.length) return;
+    const sum=vals.reduce((a,b)=>a+b,0);
+    row.appendChild(mkKPI(name,fmtN(sum),'avg '+fmtN(sum/vals.length)));
+  });
+  m.appendChild(row);
+}
+
 function buildKPIs(m,data,active){
   const row=document.createElement('div');row.className='kpi-row';
   row.appendChild(mkKPI('Total Rows',fmtN(data.length),'records'));
   active.filter(c=>c.type==='number'&&!c.isId).slice(0,5).forEach(c=>{
     const vals=data.map(r=>+r[c.name]).filter(v=>!isNaN(v));if(!vals.length)return;
     const sum=vals.reduce((a,b)=>a+b,0);
-    row.appendChild(mkKPI('Total '+c.name,fmtN(sum),'avg '+fmtN(sum/vals.length)));
+    row.appendChild(mkKPI(c.name,fmtN(sum),'avg '+fmtN(sum/vals.length)));
   });
   m.appendChild(row);
 }
+
 function mkKPI(label,val,sub){
   const d=document.createElement('div');d.className='kpi';
   d.innerHTML=`<div class="kpi-label">${label}</div><div class="kpi-val">${val}</div><div class="kpi-sub">${sub||''}</div>`;
@@ -1224,11 +1307,23 @@ function mkKPI(label,val,sub){
 }
 
 // ── INSIGHTS ──────────────────────────────────────────────────────────────────
+function buildInsightsFromPlan(m,plan){
+  if(!plan.observations||!plan.observations.length) return;
+  const bar=document.createElement('div');bar.className='ins-bar';
+  const ins=[];
+  ins.push({type:'info',text:'🤖 AI-powered analysis'});
+  if(S.requirement) ins.push({type:'info',text:'💬 Focus: '+S.requirement.slice(0,60)+(S.requirement.length>60?'…':'')});
+  plan.observations.forEach(o=>ins.push({type:'ok',text:'💡 '+o}));
+  ins.slice(0,7).forEach(i=>{
+    const c=document.createElement('div');c.className='ins-chip ins-'+i.type;c.textContent=i.text;bar.appendChild(c);
+  });
+  m.appendChild(bar);
+}
+
 function buildInsights(m,data,active){
   const bar=document.createElement('div');bar.className='ins-bar';
   const ins=[];
   const numCols=active.filter(c=>c.type==='number'&&!c.isId);
-  const textCols=active.filter(c=>c.type==='text'&&!c.isId);
   ins.push({type:'info',text:'📊 '+data.length+' rows · '+active.length+' columns'});
   if(S.requirement) ins.push({type:'info',text:'💬 Focus: '+S.requirement.slice(0,60)+(S.requirement.length>60?'…':'')});
   numCols.forEach(c=>{
@@ -1248,6 +1343,40 @@ function buildInsights(m,data,active){
     const c=document.createElement('div');c.className='ins-chip ins-'+i.type;c.textContent=i.text;bar.appendChild(c);
   });
   if(ins.length) m.appendChild(bar);
+}
+
+// ── GROUPED BAR (AI-driven: xCol=category, yCol=numeric, agg=avg|sum|count) ───
+function buildBarGrouped(parent,data,spec,colMap){
+  const {xCol,yCol,agg='avg',title}=spec;
+  const groups={};
+  data.forEach(r=>{
+    const k=String(r[xCol]??'(blank)');
+    if(!groups[k]) groups[k]={sum:0,count:0};
+    const v=+r[yCol];
+    if(!isNaN(v)){groups[k].sum+=v;groups[k].count++;}
+  });
+  const entries=Object.entries(groups)
+    .filter(([,g])=>g.count>0)
+    .map(([k,g])=>[k, agg==='sum'?g.sum : agg==='count'?g.count : g.sum/g.count])
+    .sort((a,b)=>b[1]-a[1]).slice(0,15);
+  if(entries.length<2) return;
+  const labels=entries.map(e=>e[0]), vals=entries.map(e=>e[1]);
+  const donut=labels.length<=7;
+  const{canvas}=mkCard(parent,title||xCol,(agg==='avg'?'Avg':'Total')+' '+yCol+' by '+xCol);
+  const key='bar_'+xCol+'_'+yCol;
+  S.charts[key]=new Chart(canvas,{
+    type:donut?'doughnut':'bar',
+    data:{labels,datasets:[{label:yCol,data:vals,backgroundColor:PAL.map(c=>ha(c,.8)),borderColor:PAL,borderWidth:1}]},
+    options:copts({legend:donut,noScales:donut,click:(e,els)=>{
+      if(!els.length)return;
+      const v=labels[els[0].index];
+      if(!S.filters[xCol]) S.filters[xCol]=[];
+      const fi=S.filters[xCol].indexOf(v);
+      if(fi>=0) S.filters[xCol].splice(fi,1); else S.filters[xCol].push(v);
+      if(!S.filters[xCol].length) delete S.filters[xCol];
+      refreshAll();renderSidebar();
+    }})
+  });
 }
 
 // ── CHARTS ────────────────────────────────────────────────────────────────────
