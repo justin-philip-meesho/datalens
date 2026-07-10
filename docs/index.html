@@ -837,12 +837,15 @@ function buildAggregates(data,cols){
 // ── REAL AI (backend gateway) ──────────────────────────────────────────────────
 // Auto-detect sub-path so the same file works at / (dev) and /datalens/ (hub).
 // If the page is at /datalens/datalens.html the API lives at /datalens/api/.
+// AI_BASE is the path prefix only (no /api suffix).
+// fetch calls append /api/health, /api/ai/ask etc.
+// At /datalens/datalens.html → AI_BASE='/datalens' → /datalens/api/health ✓
+// At root /datalens.html or dev → AI_BASE='' → /api/health ✓
 const AI_BASE=(()=>{
   if(location.protocol==='file:') return null;
   const parts=location.pathname.split('/').filter(Boolean);
   parts.pop(); // remove filename
-  const prefix=parts.length?'/'+parts.join(''):'';
-  return prefix+'/api';
+  return parts.length ? '/'+parts.join('/') : '';
 })();
 let AI_AVAILABLE=null;
 
