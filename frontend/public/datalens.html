@@ -804,8 +804,46 @@ function renderSummaryContent(){
   enhanceWithAI(data,cols);
 }
 
+// ── AI HELPERS ────────────────────────────────────────────────────────────────
+// Columns that contain personal / PII data — skip from AI profile entirely
+function isPIICol(name){
+  const n=name.toLowerCase().replace(/[\s_\-]/g,'');
+  return /dob|dateofbirth|birthdate|doj|dateofjoining|joiningdate|hiredate|startdate|resigndate|exitdate|terminationdate|personalphone|personalemail|homeaddress|aadhar|pan\b|passport|ssn|nic|nationalid/.test(n);
+}
+
+// Pre-compute aggregates per column so the LLM can answer aggregate questions
+// without needing to "see" the raw rows
+function buildAggregates(data,cols){
+  const agg={};
+  cols.forEach(c=>{
+    if(c.type==='number'){
+      const vals=data.map(r=>+r[c.name]).filter(v=>!isNaN(v)&&isFinite(v));
+      if(!vals.length) return;
+      const sum=vals.reduce((a,b)=>a+b,0);
+      agg[c.name]={count:vals.length,sum:Math.round(sum*100)/100,avg:Math.round(sum/vals.length*100)/100,min:aMin(vals),max:aMax(vals)};
+    } else if(c.type==='text'||c.type==='boolean'){
+      const freq={};
+      data.forEach(r=>{const v=String(r[c.name]??'');if(v)freq[v]=(freq[v]||0)+1;});
+      const sorted=Object.entries(freq).sort((a,b)=>b[1]-a[1]);
+      agg[c.name]={uniqueCount:sorted.length,top5:sorted.slice(0,5).map(([v,n])=>({value:v,count:n}))};
+    } else if(c.type==='date'){
+      const vals=data.map(r=>r[c.name]).filter(v=>v&&!isNaN(Date.parse(String(v))));
+      if(vals.length) agg[c.name]={count:vals.length,min:vals[0],max:vals[vals.length-1]};
+    }
+  });
+  return agg;
+}
+
 // ── REAL AI (backend gateway) ──────────────────────────────────────────────────
-const AI_BASE=(location.protocol==='file:')?null:'';  // '' = same origin; null = no backend (file://)
+// Auto-detect sub-path so the same file works at / (dev) and /datalens/ (hub).
+// If the page is at /datalens/datalens.html the API lives at /datalens/api/.
+const AI_BASE=(()=>{
+  if(location.protocol==='file:') return null;
+  const parts=location.pathname.split('/').filter(Boolean);
+  parts.pop(); // remove filename
+  const prefix=parts.length?'/'+parts.join(''):'';
+  return prefix+'/api';
+})();
 let AI_AVAILABLE=null;
 
 async function checkAI(){
@@ -826,10 +864,12 @@ async function enhanceWithAI(data,cols){
   if(pill){pill.textContent='✨ AI analysing…';}
   if(sub)sub.textContent='Powered by real AI via secure gateway';
   try{
+    const aiCols=cols.filter(c=>!c.isId&&!isPIICol(c.name));
     const payload={
       rowCount:data.length,
-      columns:cols.map(c=>({name:c.name,type:c.type})),
-      sampleRows:data.slice(0,40),
+      columns:aiCols.map(c=>({name:c.name,type:c.type})),
+      sampleRows:data.slice(0,80).map(r=>{ const o={}; aiCols.forEach(c=>{ o[c.name]=r[c.name]; }); return o; }),
+      aggregates:buildAggregates(data,aiCols),
       requirement:(document.getElementById('reqInput')?.value||S.requirement||'').trim()
     };
     const r=await fetch(AI_BASE+'/api/ai/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1032,27 +1072,37 @@ function renderAskAI(m){
   list.forEach(s=>{ const c=document.createElement('div'); c.className='req-sug'; c.textContent=s; c.onclick=()=>{document.getElementById('askInput').value=s;sendAsk();}; sug.appendChild(c); });
 
   // replay history
-  askHistory.forEach(h=>appendAsk(h.role,h.text));
+  askHistory.forEach(h=>appendAsk(h.role,h.text,h.ts));
 }
 
-function appendAsk(role,text){
+function appendAsk(role,text,ts){
   const thread=document.getElementById('askThread'); if(!thread) return;
-  const bubble=document.createElement('div');
   const isUser=role==='user';
-  bubble.style.cssText=`align-self:${isUser?'flex-end':'flex-start'};max-width:85%;padding:12px 16px;border-radius:14px;font-size:.87rem;line-height:1.6;${isUser?'background:var(--grad);color:#fff;border-bottom-right-radius:4px':'background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px'}`;
+  const time=ts||new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const wrap=document.createElement('div');
+  wrap.style.cssText=`display:flex;flex-direction:column;align-items:${isUser?'flex-end':'flex-start'};gap:3px`;
+  const bubble=document.createElement('div');
+  bubble.style.cssText=`max-width:85%;padding:12px 16px;border-radius:14px;font-size:.87rem;line-height:1.6;${isUser?'background:var(--grad);color:#fff;border-bottom-right-radius:4px':'background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px'}`;
   bubble.innerHTML=(isUser?'':'🤖 ')+text;
-  thread.appendChild(bubble);
-  thread.scrollIntoView({block:'end'});
+  const stamp=document.createElement('div');
+  stamp.style.cssText='font-size:.68rem;color:var(--text3);padding:0 4px';
+  stamp.textContent=time;
+  wrap.appendChild(bubble);
+  wrap.appendChild(stamp);
+  thread.appendChild(wrap);
+  wrap.scrollIntoView({block:'end'});
 }
 
 async function sendAsk(){
   const inp=document.getElementById('askInput');
   const q=inp.value.trim(); if(!q) return;
   inp.value='';
-  askHistory.push({role:'user',text:q}); appendAsk('user',q);
+  const ts=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  askHistory.push({role:'user',text:q,ts}); appendAsk('user',q,ts);
   if(!(await checkAI())){
-    const msg='AI backend not available. Start the Node server (cd backend && npm start) and open the app at localhost:9280 to enable AI answers.';
-    askHistory.push({role:'ai',text:msg}); appendAsk('ai',msg); return;
+    const msg='AI backend not available. Start the Node server and open the app at localhost:9280 (or through the hub at localhost:9090/datalens/) to enable AI answers.';
+    const ts2=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    askHistory.push({role:'ai',text:msg,ts:ts2}); appendAsk('ai',msg,ts2); return;
   }
   const thread=document.getElementById('askThread');
   const loading=document.createElement('div');
@@ -1060,16 +1110,26 @@ async function sendAsk(){
   loading.textContent='🤖 Thinking…'; thread.appendChild(loading);
   try{
     const data=applyCalcCols(S.filtered);
-    const payload={question:q,rowCount:data.length,columns:S.active.map(c=>({name:c.name,type:c.type})),sampleRows:data.slice(0,40)};
+    const aiCols=S.active.filter(c=>!c.isId&&!isPIICol(c.name));
+    const payload={
+      question:q,
+      rowCount:data.length,
+      columns:aiCols.map(c=>({name:c.name,type:c.type})),
+      sampleRows:data.slice(0,80).map(r=>{ const o={}; aiCols.forEach(c=>{ o[c.name]=r[c.name]; }); return o; }),
+      aggregates:buildAggregates(data,aiCols),
+      history:askHistory.slice(-6).map(h=>({role:h.role==='user'?'user':'assistant',content:h.text}))
+    };
     const r=await fetch(AI_BASE+'/api/ai/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json();
     loading.remove();
     const ans=j.answer||('Error: '+(j.error||'no response'));
-    askHistory.push({role:'ai',text:ans}); appendAsk('ai',ans);
+    const ts3=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    askHistory.push({role:'ai',text:ans,ts:ts3}); appendAsk('ai',ans,ts3);
   }catch(e){
     loading.remove();
     const msg='Error contacting AI: '+e.message;
-    askHistory.push({role:'ai',text:msg}); appendAsk('ai',msg);
+    const ts4=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    askHistory.push({role:'ai',text:msg,ts:ts4}); appendAsk('ai',msg,ts4);
   }
 }
 
